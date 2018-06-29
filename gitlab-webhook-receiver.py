@@ -8,36 +8,32 @@ import sys
 import logging
 import json
 import subprocess
-
+import shlex
 from string import Template
 from argparse import ArgumentParser, ArgumentDefaultsHelpFormatter
 
 try:
     # For Python 3.0 and later
-    from http.server import HTTPServer
     from http.server import BaseHTTPRequestHandler
+    from socketserver import TCPServer
 except ImportError:
     # Fall back to Python 2
     from BaseHTTPServer import BaseHTTPRequestHandler
-    from BaseHTTPServer import HTTPServer as HTTPServer
+    from SocketServer import TCPServer
 
 import yaml
-
-CONFIG = None
 
 logging.basicConfig(format='%(asctime)s %(levelname)s %(message)s',
                     level=logging.DEBUG,
                     stream=sys.stdout)
 
 
-class RequestHandler(BaseHTTPRequestHandler):
-    """A POST request handler."""
+class HookHandler(BaseHTTPRequestHandler):
+    """Handle Gitlab hook POST requests and calls a command."""
 
     def do_POST(self):
-        logging.info("Hook received")
-
         # get payload
-        header_length = int(self.headers.getheader('content-length', "0"))
+        header_length = int(self.headers.get('content-length', "0"))
         json_payload = self.rfile.read(header_length)
         json_params = {}
         if json_payload:
@@ -46,9 +42,9 @@ class RequestHandler(BaseHTTPRequestHandler):
         # get project configuration
         project = json_params['project']['homepage']
         try:
-            project_config = CONFIG[project]
+            project_config = self.server.config[project]
         except KeyError as ker:
-            self.send_response(400, "Unknown project %r" % ker)
+            self.send_response(404, "Unknown project %s" % ker)
             self.end_headers()
             return
 
@@ -61,7 +57,7 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
 
         # Check it
-        if gitlab_token != self.headers.getheader('X-Gitlab-Token'):
+        if gitlab_token != self.headers.get('X-Gitlab-Token'):
             self.send_response(401, "Invalid token")
             self.end_headers()
             return
@@ -79,18 +75,24 @@ class RequestHandler(BaseHTTPRequestHandler):
 
         # Get the command to call
         try:
+            configured_command = project_config["command"]
+        except KeyError:
+            self.send_response(500, "No command defined for project")
+            self.end_headers()
+            return
+
+        if not isinstance(configured_command, list):
+            configured_command = shlex.split(configured_command)
+
+        try:
             # Substitute $variable => available_params["variable"]
             command = [Template(i).substitute(**available_params)
-                       for i in project_config.get("command", ())]
+                       for i in configured_command]
         except KeyError as err:
             self.send_response(500, "Invalid substitution %s in command" % err)
             self.end_headers()
             self.wfile.write("Available substitutions: %s\n"
                              % ", ".join(available_params))
-            return
-        if not command:
-            self.send_response(500, "No command defined for project")
-            self.end_headers()
             return
 
         logging.info("Calling %s", " ".join(command))
@@ -102,6 +104,19 @@ class RequestHandler(BaseHTTPRequestHandler):
             return
         self.send_response(200, "Hook command called")
         self.end_headers()
+
+
+class WebhookServer(TCPServer, object):
+    """Like TCPServer but has a config attribute.
+
+    We subclass TCPServer directly because HTTPServer does some name resolution
+    at binding time which isn't useful and might not work.
+    """
+    allow_reuse_address = True
+
+    def __init__(self, addr, port, config):
+        super(WebhookServer, self).__init__((addr, port), HookHandler)
+        self.config = config
 
 
 def get_parser():
@@ -126,20 +141,20 @@ def get_parser():
 
 
 def main():
-    global CONFIG  # FIXME XXX TODO YUCK
-    parser = get_parser()
-
-    args = parser.parse_args()
+    args = get_parser().parse_args()
 
     # load config file
     try:
         with open(args.cfg, 'r') as stream:
-            CONFIG = yaml.load(stream)
+            config = yaml.load(stream)
     except IOError as err:
         logging.error("Config file %s could not be loaded: %s", args.cfg, err)
         sys.exit(1)
-    httpd = HTTPServer((args.addr, args.port), RequestHandler)
-    httpd.serve_forever()
+    httpd = WebhookServer(args.addr, args.port, config)
+    try:
+        httpd.serve_forever()
+    except KeyboardInterrupt:
+        logging.info("caught sigint, stopping")
 
 
 if __name__ == '__main__':

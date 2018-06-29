@@ -13,7 +13,11 @@ The script requires, that the gitlab secret token is set! You can define the val
 The structure of the [configuration file](#example-config) requires the homepage of the gitlab project as key.
 
 ### Command
-Define, which command should be run after the hook was received.
+Define which command should be run after the hook was received.
+
+A few variables coming from the hook payload are available as variables that
+will be substituted shell-style when included in the command: `event`, `sha`,
+`user`, `ref`, `project_name` and `project_owner`.
 
 ### Example config
 ```
@@ -25,7 +29,11 @@ https://git.example.ch/exmaple/myrepo:
   gitlab_token: mysecret-myrepo
 # test-repo
 https://git.example.ch/exmaple/test-repo:
-  command: uname
+  command:
+    - /usr/local/bin/myscript
+    - $project_name
+    - $project_owner
+    - $ref
   gitlab_token: mysecret-test-repo
 ```
 

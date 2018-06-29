@@ -1,0 +1,8 @@
+---
+# myrepo
+http://example.com/mike/diaspora:
+  command:
+    - uname
+    - -a
+  gitlab_token: test_token
+
